@@ -10,7 +10,7 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 	does not exist in the training data, it predicts the rating
 	to be the overall average rating in the training data.
 	"""
-	def __init__(self, user_col='userId', item_col='movieId', rating_col='rating', lambda_reg=1, n_factors=100, max_iter=100):
+	def __init__(self, user_col='userId', item_col='movieId', rating_col='rating', lambda_reg=1, n_factors=100, max_iter=100, lr=0.1):
 		"""
 		@param id_col: column name of ID
 		@param rating_col: column name of rating
@@ -21,6 +21,7 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		self.lambda_reg = lambda_reg
 		self.n_factors = n_factors
 		self.max_iter = max_iter
+		self.lr = lr
 
 		self.prepared = False
 		self.fitted = False
@@ -41,6 +42,12 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		self.user2idx = {user: idx for (idx, user) in enumerate(self.users)}
 		self.item2idx = {item: idx for (idx, item) in enumerate(self.items)}
 
+		self.user_vec = np.random.rand(self.num_users, self.n_factors) 
+		self.item_vec = np.random.rand(self.n_factors, self.num_items)
+
+		self.user_bias = np.zeros(self.num_users)
+		self.item_bias = np.zeros(self.num_items)
+
 		# construct matrix
 		self.R_mat = np.zeros((self.num_users, self.num_items))
 		for row in train_data.iterrows():
@@ -57,9 +64,6 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		if not self.prepared:
 			raise RuntimeError("You must prepare model before training.")
 
-		self.user_vec = np.random.rand(self.num_users, self.n_factors) 
-		self.item_vec = np.random.rand(self.n_factors, self.num_items)
-
 		if not num_iter:
 			num_iter = self.max_iter
 
@@ -68,9 +72,34 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		                        np.dot(self.item_vec, self.R_mat.T)).T
 		    self.item_vec = np.linalg.solve(np.dot(self.user_vec.T, self.user_vec) + self.lambda_reg * np.eye(self.n_factors),
 		                        np.dot(self.user_vec.T, self.R_mat))
-		    if i % 10 == 0:
-		        print('{}th iteration'.format(i))
 		
+		self.fitted = True
+		return self
+
+	def fit_sgd(self, num_iter=None):
+		if not self.prepared:
+			raise RuntimeError("You must prepare model before training.")
+		if not num_iter:
+			num_iter = self.max_iter
+
+		row_index, col_index = self.R_mat.nonzero()
+		training_index = np.arange(len(row_index))
+		np.random.shuffle(training_index)
+
+		for it in range(num_iter):
+			for idx in training_index:
+				userIdx = row_index[idx]
+				itemIdx = col_index[idx]
+
+				p = self.user_bias[userIdx] + self.item_bias[itemIdx] + self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx])
+				loss = self.R_mat[userIdx, itemIdx] - p
+				
+				self.user_bias[userIdx] += self.lr * (loss - self.user_bias[userIdx])
+				self.item_bias[itemIdx] += self.lr * (loss - self.item_bias[itemIdx])
+
+				self.user_vec[userIdx, :] += self.lr * (loss * self.item_vec[:, itemIdx] - self.lambda_reg * self.user_vec[userIdx,:])
+				self.item_vec[:, itemIdx] += self.lr * (loss * self.user_vec[userIdx, :] - self.lambda_reg * self.item_vec[:,itemIdx])
+
 		self.fitted = True
 		return self
 
@@ -88,15 +117,14 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		userIdx = self.user2idx[userId]
 		itemIdx = self.item2idx[itemId]
 
-		return self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx])
+		return self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx]) + self.user_bias[userIdx] + self.item_bias[itemIdx]
 
 	def predict(self, test_data):
 		if not self.fitted:
 			raise RuntimeError("You must train model before predicting data.")
 
-		pred = []
-		for row in test_data.iterrows():
-			pred.append(self.predict_one(row[1][self.user_col], row[1][self.item_col]))
+		pred = [self.predict_one(row[1][self.user_col], row[1][self.item_col]) for row in test_data.iterrows()]
+
 		return pred
 
 	def score(self, X):
@@ -107,5 +135,6 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		@returns a float, the RMSE
 		"""
 		preds = self.predict(X)
+
 		return np.sqrt(mean_squared_error(X[self.rating_col].as_matrix(), preds))
 		
