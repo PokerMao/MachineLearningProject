@@ -5,15 +5,20 @@ from sklearn.metrics import mean_squared_error
 
 class ALSRecommender(BaseEstimator, RegressorMixin):
 	"""
-	Baseline model that predicts user ratings to be the average
-	of rating for that object in the training data. If an object
-	does not exist in the training data, it predicts the rating
-	to be the overall average rating in the training data.
+	Model that implements the matrix factorization method using two methods:
+	Alternating least squares and SGD. Method can be specified upon initialization.
 	"""
-	def __init__(self, user_col='userId', item_col='movieId', rating_col='rating', lambda_reg=1, n_factors=100, max_iter=100, lr=0.1):
+	def __init__(self, user_col='userId', item_col='movieId', rating_col='rating', lambda_reg=1, n_factors=100, max_iter=100, lr=0.1, decay=1.0, method='als'):
 		"""
-		@param id_col: column name of ID
+		@param user_col: column name of user
+		@param item_col: column name of item
 		@param rating_col: column name of rating
+		@param lambda_reg: regularization parameter
+		@param n_factors: dimension of latent factors
+		@param max_iter: maximum number of epochs to run
+		@param lr: learning rate
+		@param decay: decay rate of lr per epoch
+		@param method: method to use for algorithm, either 'als' or 'sgd'
 		"""
 		self.user_col = user_col
 		self.item_col = item_col
@@ -22,6 +27,8 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		self.n_factors = n_factors
 		self.max_iter = max_iter
 		self.lr = lr
+		self.decay = decay
+		self.method = method
 
 		self.prepared = False
 		self.fitted = False
@@ -48,6 +55,8 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		self.user_bias = np.zeros(self.num_users)
 		self.item_bias = np.zeros(self.num_items)
 
+		self.overall_bias = np.mean(train_data[self.rating_col])
+
 		# construct matrix
 		self.R_mat = np.zeros((self.num_users, self.num_items))
 		for row in train_data.iterrows():
@@ -67,40 +76,42 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		if not num_iter:
 			num_iter = self.max_iter
 
+		curr_lr = self.lr
 		for i in range(num_iter):
-		    self.user_vec = np.linalg.solve(np.dot(self.item_vec, self.item_vec.T) + self.lambda_reg * np.eye(self.n_factors), 
-		                        np.dot(self.item_vec, self.R_mat.T)).T
-		    self.item_vec = np.linalg.solve(np.dot(self.user_vec.T, self.user_vec) + self.lambda_reg * np.eye(self.n_factors),
-		                        np.dot(self.user_vec.T, self.R_mat))
+			if self.method=='sgd':
+				self.sgd_epoch(lr=curr_lr)
+				curr_lr *= self.decay
+			else:
+				self.als_epoch()
 		
 		self.fitted = True
 		return self
 
-	def fit_sgd(self, num_iter=None):
-		if not self.prepared:
-			raise RuntimeError("You must prepare model before training.")
-		if not num_iter:
-			num_iter = self.max_iter
+	def als_epoch(self):
+		self.user_vec = np.linalg.solve(np.dot(self.item_vec, self.item_vec.T) + self.lambda_reg * np.eye(self.n_factors), 
+		                        np.dot(self.item_vec, self.R_mat.T)).T
+		self.item_vec = np.linalg.solve(np.dot(self.user_vec.T, self.user_vec) + self.lambda_reg * np.eye(self.n_factors),
+		                        np.dot(self.user_vec.T, self.R_mat))
+		return self
 
+	def sgd_epoch(self, lr=0.1):
 		row_index, col_index = self.R_mat.nonzero()
 		training_index = np.arange(len(row_index))
 		np.random.shuffle(training_index)
 
-		for it in range(num_iter):
-			for idx in training_index:
-				userIdx = row_index[idx]
-				itemIdx = col_index[idx]
+		for idx in training_index:
+			userIdx = row_index[idx]
+			itemIdx = col_index[idx]
 
-				p = self.user_bias[userIdx] + self.item_bias[itemIdx] + self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx])
-				loss = self.R_mat[userIdx, itemIdx] - p
-				
-				self.user_bias[userIdx] += self.lr * (loss - self.user_bias[userIdx])
-				self.item_bias[itemIdx] += self.lr * (loss - self.item_bias[itemIdx])
+			p = self.overall_bias + self.user_bias[userIdx] + self.item_bias[itemIdx] + self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx])
+			loss = self.R_mat[userIdx, itemIdx] - p
 
-				self.user_vec[userIdx, :] += self.lr * (loss * self.item_vec[:, itemIdx] - self.lambda_reg * self.user_vec[userIdx,:])
-				self.item_vec[:, itemIdx] += self.lr * (loss * self.user_vec[userIdx, :] - self.lambda_reg * self.item_vec[:,itemIdx])
+			self.user_bias[userIdx] += lr * (loss - self.lambda_reg * self.user_bias[userIdx])
+			self.item_bias[itemIdx] += lr * (loss - self.lambda_reg * self.item_bias[itemIdx])
 
-		self.fitted = True
+			self.user_vec[userIdx, :] += lr * (loss * self.item_vec[:, itemIdx] - self.lambda_reg * self.user_vec[userIdx,:])
+			self.item_vec[:, itemIdx] += lr * (loss * self.user_vec[userIdx, :] - self.lambda_reg * self.item_vec[:,itemIdx])
+		
 		return self
 
 	def predict_one(self, userId, itemId):
@@ -117,7 +128,7 @@ class ALSRecommender(BaseEstimator, RegressorMixin):
 		userIdx = self.user2idx[userId]
 		itemIdx = self.item2idx[itemId]
 
-		return self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx]) + self.user_bias[userIdx] + self.item_bias[itemIdx]
+		return self.overall_bias + self.user_vec[userIdx,:].dot(self.item_vec[:,itemIdx]) + self.user_bias[userIdx] + self.item_bias[itemIdx]
 
 	def predict(self, test_data):
 		if not self.fitted:
